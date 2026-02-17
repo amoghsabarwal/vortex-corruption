@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vortex Labs – Corruption Engine</title>
+<style>
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #000;
+  overflow: hidden;
+}
+canvas {
+  width: 100vw;
+  height: 100vh;
+  display: block;
+}
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+
+<script>
+const canvas = document.getElementById("glcanvas");
+const gl = canvas.getContext("webgl");
+if (!gl) alert("WebGL not supported");
+
+/* ===== Resize ===== */
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio, 2);
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ===== Load SVG ===== */
+const image = new Image();
+image.src = "kraken.svg";
+
+image.onload = function () {
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  start(texture);
+};
+
+function start(texture) {
+
+const vertexSrc = `
+attribute vec2 position;
+varying vec2 vUv;
+void main(){
+  vUv = position * 0.5 + 0.5;
+  gl_Position = vec4(position,0.0,1.0);
+}
+`;
+
+const fragmentSrc = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uTexture;
+uniform vec2 uMouse;
+uniform vec2 uVelocity;
+uniform float uTime;
+uniform float uShock;
+
+/* ===== Utilities ===== */
+
+float random(vec2 st){
+  return fract(sin(dot(st.xy,vec2(12.9898,78.233))) * 43758.5453123);
+}
+
+float line(vec2 uv, vec2 a, vec2 b){
+  vec2 pa = uv - a;
+  vec2 ba = b - a;
+  float h = clamp(dot(pa,ba)/dot(ba,ba),0.0,1.0);
+  return length(pa - ba*h);
+}
+
+/* ===== Glyphs ===== */
+
+float glyphV(vec2 uv){
+  return min(
+    line(uv,vec2(0.2,0.8),vec2(0.5,0.2)),
+    line(uv,vec2(0.8,0.8),vec2(0.5,0.2))
+  );
+}
+
+float glyphX(vec2 uv){
+  return min(
+    line(uv,vec2(0.2,0.2),vec2(0.8,0.8)),
+    line(uv,vec2(0.8,0.2),vec2(0.2,0.8))
+  );
+}
+
+float glyphO(vec2 uv){
+  return abs(length(uv-0.5)-0.32);
+}
+
+float glyphHash(vec2 uv){
+  return min(
+    min(abs(uv.y-0.35),abs(uv.y-0.65)),
+    min(abs(uv.x-0.35),abs(uv.x-0.65))
+  );
+}
+
+float glyphPlus(vec2 uv){
+  return min(abs(uv.y-0.5),abs(uv.x-0.5));
+}
+
+/* ===== Main ===== */
+
+void main(){
+
+  vec2 uv = vUv;
+
+  vec4 original = texture2D(uTexture, uv);
+
+  /* ===== Grid ===== */
+  float gridSize = 120.0;
+  vec2 grid = vec2(gridSize);
+  vec2 block = floor(uv * grid) / grid;
+  vec2 cellUV = fract(uv * grid);
+  vec2 center = block + (0.5/grid);
+
+  float dist = distance(center, uMouse);
+
+  /* Velocity */
+  float velStrength = length(uVelocity) * 5.0;
+
+  /* Shockwave */
+  float shockRing = abs(dist - uShock);
+  float shock = smoothstep(0.02,0.0,shockRing);
+
+  /* Base influence */
+  float influence = pow(smoothstep(0.22,0.0,dist),1.4);
+
+  influence += shock;
+  influence *= (1.0 + velStrength);
+  influence = clamp(influence,0.0,1.0);
+
+  if(influence < 0.01){
+    gl_FragColor = original;
+    return;
+  }
+
+  /* RGB Tear */
+  float shift = 0.008 * influence;
+  float r = texture2D(uTexture, uv + vec2(shift,0.0)).r;
+  float g = texture2D(uTexture, uv).g;
+  float b = texture2D(uTexture, uv - vec2(shift,0.0)).b;
+  vec3 torn = vec3(r,g,b);
+
+  /* Glyph */
+  float choice = floor(random(block + floor(uTime*3.0))*5.0);
+  float d;
+
+  if(choice==0.0) d=glyphV(cellUV);
+  else if(choice==1.0) d=glyphX(cellUV);
+  else if(choice==2.0) d=glyphO(cellUV);
+  else if(choice==3.0) d=glyphHash(cellUV);
+  else d=glyphPlus(cellUV);
+
+  float stroke = smoothstep(0.05,0.02,d);
+
+  vec3 brutal = mix(vec3(0.0),vec3(1.0),stroke);
+
+  vec3 finalColor = mix(torn, brutal, influence);
+
+  /* Visible grid */
+  float gridLine =
+    step(0.99, fract(uv.x*gridSize)) +
+    step(0.99, fract(uv.y*gridSize));
+
+  finalColor = mix(finalColor, vec3(1.0), gridLine*0.5*influence);
+
+  gl_FragColor = vec4(finalColor,1.0);
+}
+`;
+
+function compile(type, source){
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  return shader;
+}
+
+const vertexShader = compile(gl.VERTEX_SHADER, vertexSrc);
+const fragmentShader = compile(gl.FRAGMENT_SHADER, fragmentSrc);
+
+const program = gl.createProgram();
+gl.attachShader(program, vertexShader);
+gl.attachShader(program, fragmentShader);
+gl.linkProgram(program);
+gl.useProgram(program);
+
+const vertices = new Float32Array([
+-1,-1,
+ 1,-1,
+-1, 1,
+ 1, 1
+]);
+
+const buffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+const position = gl.getAttribLocation(program,"position");
+gl.enableVertexAttribArray(position);
+gl.vertexAttribPointer(position,2,gl.FLOAT,false,0,0);
+
+const uMouse = gl.getUniformLocation(program,"uMouse");
+const uVelocity = gl.getUniformLocation(program,"uVelocity");
+const uTime = gl.getUniformLocation(program,"uTime");
+const uShock = gl.getUniformLocation(program,"uShock");
+const uTexture = gl.getUniformLocation(program,"uTexture");
+
+gl.uniform1i(uTexture,0);
+
+let mouse = {x:0.5,y:0.5};
+let prev = {x:0.5,y:0.5};
+let velocity = {x:0.0,y:0.0};
+let shock = 10.0;
+
+canvas.addEventListener("mousemove",e=>{
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX-rect.left)/rect.width;
+  const y = 1.0 - (e.clientY-rect.top)/rect.height;
+
+  velocity.x = x - prev.x;
+  velocity.y = y - prev.y;
+
+  prev.x = x;
+  prev.y = y;
+
+  mouse.x = x;
+  mouse.y = y;
+});
+
+canvas.addEventListener("click",()=>{
+  shock = 0.0;
+});
+
+function render(time){
+  shock += 0.01;
+  velocity.x *= 0.9;
+  velocity.y *= 0.9;
+
+  gl.uniform2f(uMouse,mouse.x,mouse.y);
+  gl.uniform2f(uVelocity,velocity.x,velocity.y);
+  gl.uniform1f(uTime,time*0.001);
+  gl.uniform1f(uShock,shock);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  requestAnimationFrame(render);
+}
+render(0);
+
+}
+</script>
+</body>
+</html>
